@@ -1,0 +1,8 @@
+{
+  "name": "Remix: NIFTY Options Trading Terminal",
+  "description": "Intraday Options Buyer Terminal for NIFTY trading, featuring multi-timeframe analytics, order flow scalper Mode, custom Black-Scholes Greeks, strategy payoffs, and DuckDB querying.\nHigher Timeframe MARKET Structure analysis and tick based lower timeframe microstructure analysis TAB -\u003eOrder Flow Visualizer: Absorption \u0026 Vacuum\nHeatmap (Depth), Dots (Trades). Absorption (Diamond) shows rejection; Vacuum (Triangle) shows removed liquidity.\n\n",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
