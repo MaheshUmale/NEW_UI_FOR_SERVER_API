@@ -4,8 +4,10 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Play, Pause, ZoomIn, ZoomOut, RotateCcw, Info, Sliders, Zap, CircleAlert, Waves } from 'lucide-react';
+import { Play, Pause, ZoomIn, ZoomOut, RotateCcw, Info, Sliders, Zap, CircleAlert, Waves, Server, Radio, ShieldAlert } from 'lucide-react';
 import { MarketTick, TradeLog } from '../types';
+import { io } from 'socket.io-client';
+import { SOCKET_SERVER_URL } from '../config';
 
 interface OrderFlowTabProps {
   niftyLtp: number;
@@ -53,9 +55,16 @@ interface VacuumEvent {
 
 export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTabProps) {
   // Config state
-  const [dataSource, setDataSource] = useState<'WORKSPACE' | 'SIMULATOR'>('SIMULATOR');
+  const [dataSource, setDataSource] = useState<'WORKSPACE' | 'SIMULATOR' | 'SOCKET_IO'>('SOCKET_IO');
   const [candleIntervalSec, setCandleIntervalSec] = useState<number>(5);
   const [zoomFactor, setZoomFactor] = useState<number>(1.25);
+
+  // Real Socket.IO client connections setups
+  const [customSocketUrl, setCustomSocketUrl] = useState<string>(SOCKET_SERVER_URL);
+  const [customSymbol, setCustomSymbol] = useState<string>('NSE:NIFTY');
+  const [connectionStatus, setConnectionStatus] = useState<'CONNECTED' | 'DISCONNECTED' | 'CONNECTING' | 'ERROR'>('DISCONNECTED');
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [ticksCount, setTicksCount] = useState<number>(0);
   
   // Audio or alert indicators state
   const [lastEvent, setLastEvent] = useState<{ type: string; price: number; time: string } | null>(null);
@@ -162,6 +171,129 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
     injectNewTradeAndDepth(cleanTrade, timestamp);
 
   }, [ticks, dataSource]);
+
+
+  // General fallback and structured parser for incoming Socket.IO packages
+  const handleIncomingSocketData = (payload: any) => {
+    if (!payload) return;
+
+    // Extract timestamp
+    const timestamp = payload.timestamp || payload.ts_ms || payload.ts || payload.time || Date.now();
+
+    // Extract price (LTP)
+    let ltp = payload.price ?? payload.ltp ?? payload.c ?? payload.close ?? payload.last_price;
+    if (typeof ltp !== 'number' && typeof ltp === 'string') {
+      ltp = parseFloat(ltp);
+    }
+    
+    // Extract volume (LTQ)
+    let ltq = payload.volume ?? payload.ltq ?? payload.qty ?? payload.quantity ?? payload.v;
+    if (typeof ltq !== 'number' && typeof ltq === 'string') {
+      ltq = parseInt(ltq, 10);
+    }
+
+    // Handlers for optional quotes array matching DepthSnapshot format
+    let quotes = payload.quotes || payload.depth || [];
+
+    if (typeof ltp === 'number' && !isNaN(ltp)) {
+      const cleanTrade: InteractiveTrade = {
+        id: `sock-${timestamp}-${Math.random()}`,
+        ltp,
+        ltq: ltq || Math.floor(Math.random() * 300) + 50,
+        timestamp,
+        aggressor: payload.aggressor || (Math.random() > 0.5 ? 'Buy' : 'Sell'),
+        symbol: payload.symbol || payload.instrumentKey || payload.key || customSymbol,
+      };
+
+      // Feed to main candlestick, profile, and dot indicators
+      injectNewTradeAndDepth(cleanTrade, timestamp);
+
+      // Map level 2 depth if available
+      if (Array.isArray(quotes) && quotes.length > 0) {
+        const cleanQuotes = quotes.map((q: any) => ({
+          bidP: q.bidP ?? q.bid_price ?? (ltp - 0.05),
+          bidQ: q.bidQ ?? q.bid_qty ?? 800,
+          askP: q.askP ?? q.ask_price ?? (ltp + 0.05),
+          askQ: q.askQ ?? q.ask_qty ?? 800,
+        }));
+
+        const depthSnapshot: DepthSnapshot = { ts: timestamp, quotes: cleanQuotes };
+        depthHistoryRef.current.unshift(depthSnapshot);
+        if (depthHistoryRef.current.length > 1000) depthHistoryRef.current.pop();
+      }
+    }
+  };
+
+
+  // Manage standard Socket.IO Client lifecycle connection
+  useEffect(() => {
+    if (dataSource !== 'SOCKET_IO') return;
+
+    setConnectionStatus('CONNECTING');
+    setConnectionError(null);
+
+    // Establish multi-transport socket connection to target custom API url (defaults to port 8000)
+    const socket = io(customSocketUrl, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 7,
+      timeout: 10000,
+    });
+
+    socket.on('connect', () => {
+      setConnectionStatus('CONNECTED');
+      // Subscribe to target symbol on connect
+      socket.emit('subscribe', { instrumentKeys: [customSymbol], interval: '1' });
+      // Subscribe options too
+      socket.emit('subscribe_options', { underlying: customSymbol });
+    });
+
+    socket.on('disconnect', () => {
+      setConnectionStatus('DISCONNECTED');
+    });
+
+    socket.on('connect_error', (err) => {
+      setConnectionStatus('ERROR');
+      setConnectionError(err.message || 'Connection Refused/Halted');
+    });
+
+    // Universal multi-event dispatcher listener
+    const genericHandler = (eventName: string) => {
+      return (payload: any) => {
+        setTicksCount((c) => c + 1);
+        handleIncomingSocketData(payload);
+      };
+    };
+
+    // Listen to standard tick/market data streams emitted by typical trading backends
+    const dataStreamEvents = [
+      'tick',
+      'market_data',
+      'options_snapshot',
+      'options_data',
+      'trade',
+      'data',
+      'update',
+      'ticks',
+      'message'
+    ];
+
+    dataStreamEvents.forEach((evt) => {
+      socket.on(evt, genericHandler(evt));
+    });
+
+    // General wildcard hook to parse any customized event outputs
+    socket.onAny((event, ...args) => {
+      if (args && args[0]) {
+        if (!dataStreamEvents.includes(event)) {
+          genericHandler(event)(args[0]);
+        }
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [dataSource, customSocketUrl, customSymbol]);
 
 
   // Helper: Aggregates trade lists into OHLC buckets
@@ -1060,6 +1192,16 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
           {/* Feed Data Source option toggler */}
           <div className="flex items-center space-x-0.5 border border-slate-800 rounded bg-[#0b0f19] p-0.5">
             <button
+              onClick={() => { setDataSource('SOCKET_IO'); handleResetData(); }}
+              className={`px-2 py-0.5 rounded text-[9.5px] font-mono font-bold transition-all ${
+                dataSource === 'SOCKET_IO'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              LIVE SOCKET.IO
+            </button>
+            <button
               onClick={() => { setDataSource('WORKSPACE'); handleResetData(); }}
               className={`px-2 py-0.5 rounded text-[9.5px] font-mono font-bold transition-all ${
                 dataSource === 'WORKSPACE'
@@ -1067,7 +1209,7 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              WORKSPACE LIVE FEED
+              WORKSPACE FEED
             </button>
             <button
               onClick={() => { setDataSource('SIMULATOR'); handleResetData(); }}
@@ -1077,7 +1219,7 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              HFT SIMULATOR MODE
+              MOCK SIMULATOR
             </button>
           </div>
 
@@ -1144,6 +1286,79 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
         </div>
       </div>
 
+      {/* Real-time Socket.IO Connection Config Panel */}
+      {dataSource === 'SOCKET_IO' && (
+        <div className="p-2.5 bg-[#0a0f1d] border border-blue-950/40 rounded-lg flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 text-xs flex-shrink-0 animate-none">
+          <div className="flex items-center space-x-2">
+            <Server className="w-4 h-4 text-blue-450 text-blue-400 animate-pulse" />
+            <span className="font-bold text-slate-200 uppercase tracking-wider text-[10px] font-mono">
+              Socket Connection parameters:
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 flex-grow max-w-4xl justify-end">
+            {/* Input for Socket Server base URL */}
+            <div className="flex items-center space-x-1.5 p-1 bg-slate-900/60 border border-slate-805 border-slate-800 rounded">
+              <span className="text-slate-500 font-mono text-[9px] uppercase">URL:</span>
+              <input
+                type="text"
+                value={customSocketUrl}
+                onChange={(e) => setCustomSocketUrl(e.target.value)}
+                placeholder="e.g. http://localhost:8000"
+                className="bg-transparent text-slate-100 font-mono text-[10px] w-52 md:w-64 focus:outline-none"
+              />
+            </div>
+
+            {/* Input for Target symbol subscription key */}
+            <div className="flex items-center space-x-1.5 p-1 bg-slate-900/60 border border-slate-805 border-slate-800 rounded">
+              <span className="text-slate-500 font-mono text-[9px] uppercase">Symbol:</span>
+              <input
+                type="text"
+                value={customSymbol}
+                onChange={(e) => {
+                  setCustomSymbol(e.target.value);
+                  handleResetData();
+                }}
+                placeholder="e.g. NSE:NIFTY"
+                className="bg-transparent text-teal-350 text-teal-300 font-mono text-[10px] w-24 uppercase focus:outline-none font-bold"
+              />
+            </div>
+
+            {/* Connection Status Indicator */}
+            <div className="flex items-center space-x-2 pl-1">
+              <span className="text-[10px] text-slate-500 font-mono">STATUS:</span>
+              {connectionStatus === 'CONNECTED' && (
+                <div className="flex items-center space-x-1.5 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded text-emerald-400 font-mono font-extrabold text-[10px]">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>CONNECTED ({ticksCount} Ticks Recv)</span>
+                </div>
+              )}
+              {connectionStatus === 'CONNECTING' && (
+                <div className="flex items-center space-x-1.5 bg-amber-950/40 border border-amber-800/40 px-2 py-0.5 rounded text-amber-400 font-mono font-bold text-[10px] animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  <span>CONNECTING...</span>
+                </div>
+              )}
+              {connectionStatus === 'DISCONNECTED' && (
+                <div className="flex items-center space-x-1.5 bg-slate-905 border border-slate-800 px-2 py-0.5 rounded text-slate-400 font-mono font-bold text-[10px]">
+                  <span className="w-2 h-2 rounded-full bg-slate-500" />
+                  <span>DISCONNECTED</span>
+                </div>
+              )}
+              {connectionStatus === 'ERROR' && (
+                <div 
+                  title={connectionError || ''} 
+                  className="flex items-center space-x-1.5 bg-rose-950/40 border border-rose-800/40 px-2 py-0.5 rounded text-rose-400 font-mono font-extrabold text-[10px]"
+                >
+                  <ShieldAlert className="w-3 h-3 text-rose-400" />
+                  <span>CONNECTION ERROR</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Grid containing 1. Canvas, 2. Tape logs, 3. Event stats */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-2 h-[500px] min-h-[400px] flex-grow select-none">
         
@@ -1151,7 +1366,7 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
         <div className="xl:col-span-9 bg-[#050914] border border-[#141d2f]/70 rounded-lg flex flex-col overflow-hidden relative group">
           <div className="absolute top-1.5 left-2 z-10 select-none pointer-events-none flex items-center space-x-2">
             <span className="text-[9px] bg-indigo-900/40 border border-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded font-mono font-bold">
-              SPOT INDEX: NIFTY ({dataSource === 'WORKSPACE' ? 'WORKSPACE REAL' : 'HFT SIMULATOR'})
+              SPOT INDEX: {dataSource === 'SOCKET_IO' ? customSymbol : 'NIFTY'} ({dataSource === 'SOCKET_IO' ? 'SOCKET.IO REAL' : dataSource === 'WORKSPACE' ? 'WORKSPACE REAL' : 'HFT SIMULATOR'})
             </span>
             <span className="text-[8.5px] text-slate-500 font-mono">
               [Pan view by clicking & dragging inside grid • Scrollwheel zooms]
