@@ -24,12 +24,6 @@ export const SOCKET_SERVER_URL =
   (import.meta as any).env.VITE_SOCKET_SERVER_URL || 
   (typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8000` : 'http://localhost:8000');
 
-// 3. Broker Connection / Sandstone Auth Details
-export const BROKER_CREDENTIALS = {
-  CLIENT_ID: (import.meta as any).env.VITE_BROKER_CLIENT_ID || 'DEMO_CLIENT_ID',
-  REDIRECT_URI: (import.meta as any).env.VITE_BROKER_REDIRECT_URI || 'http://localhost:3000/auth/callback',
-};
-
-// 4. Fallback default configurations
+// 3. Fallback default configurations
 export const DEFAULT_TICKER_SYMBOL = 'NSE:NIFTY';
 export const DEFAULT_TICK_SIZE = 0.05;
