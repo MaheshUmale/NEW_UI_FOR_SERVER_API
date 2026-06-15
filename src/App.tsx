@@ -14,6 +14,8 @@ import ChartsTab from './components/ChartsTab';
 import OrderFlowTab from './components/OrderFlowTab';
 import { Candle, OptionChainPayload, OptionContract, MarketTick, TradeLog, Position, BrainSignal, Alert, Strategy, DbTableInfo, DbQueryResult, TradingMode } from './types';
 import { Sparkles, Bell, WifiOff, RefreshCw, X, Cpu } from 'lucide-react';
+import { io } from 'socket.io-client';
+import { API_SERVER_URL, SOCKET_SERVER_URL } from './config';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('home');
@@ -60,285 +62,313 @@ export default function App() {
   const [toastAlert, setToastAlert] = useState<{ id: string; message: string; title: string } | null>(null);
 
   // Refs for loop controls
-  const tickTimerRef = useRef<any>(null);
+  const socketRef = useRef<any>(null);
   const currentNiftyPriceRef = useRef<number>(22152.40);
 
-  // Generate mock candles on initialize
+  // Initialize Socket.IO connection on mount or asset shift
   useEffect(() => {
-    // Generate 40 initial candles for neat plotting
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const timeframeSecs = 60; // 1m candles base
+    // Connect to port 8000 backend
+    const socket = io(SOCKET_SERVER_URL, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10,
+      reconnectionDelay: 2000,
+    });
+    socketRef.current = socket;
 
-    const tempNifty: Candle[] = [];
-    const tempCall: Candle[] = [];
-    const tempPut: Candle[] = [];
-
-    let baseNifty = 22110.0;
-    let baseCall = 125.0;
-    let basePut = 100.0;
-
-    for (let i = 40; i >= 1; i--) {
-      const time = nowSecs - i * timeframeSecs;
-
-      // Nifty
-      const openN = baseNifty + (Math.random() * 20 - 10);
-      const closeN = openN + (Math.random() * 16 - 8);
-      const highN = Math.max(openN, closeN) + Math.random() * 6;
-      const lowN = Math.min(openN, closeN) - Math.random() * 6;
-      tempNifty.push({ time, open: openN, high: highN, low: lowN, close: closeN, volume: Math.floor(Math.random() * 12000 + 4000) });
-      baseNifty = closeN;
-
-      // Call Premium
-      const openC = baseCall + (Math.random() * 8 - 4);
-      const closeC = openC + (Math.random() * 6 - 3);
-      const highC = Math.max(openC, closeC) + Math.random() * 3;
-      const lowC = Math.min(openC, closeC) - Math.random() * 3;
-      tempCall.push({ time, open: openC, high: highC, low: lowC, close: closeC, volume: Math.floor(Math.random() * 4000 + 1000) });
-      baseCall = closeC;
-
-      // Put Premium
-      const openP = basePut + (Math.random() * 8 - 4);
-      const closeP = openP + (Math.random() * 6 - 3);
-      const highP = Math.max(openP, closeP) + Math.random() * 3;
-      const lowP = Math.min(openP, closeP) - Math.random() * 3;
-      tempPut.push({ time, open: openP, high: highP, low: lowP, close: closeP, volume: Math.floor(Math.random() * 4000 + 1000) });
-      basePut = closeP;
-    }
-
-    setCandlesNifty(tempNifty);
-    setCandlesCall(tempCall);
-    setCandlesPut(tempPut);
-    currentNiftyPriceRef.current = baseNifty;
-
-    // Load initial support and resistance levels
-    setSupportResistance({
-      support: [
-        { strike: 21950, oi: 1540000 },
-        { strike: 22000, oi: 1980000 },
-      ],
-      resistance: [
-        { strike: 22350, oi: 1420000 },
-        { strike: 22400, oi: 2110000 },
-      ],
+    socket.on('connect', () => {
+      setIsConnected(true);
+      const activeInstrument = underlying === 'NIFTY' ? 'NSE:NIFTY' : underlying.startsWith('NSE:') ? underlying : `NSE:${underlying}`;
+      socket.emit('subscribe', { instrumentKeys: [activeInstrument], interval: '1' });
+      socket.emit('subscribe_options', { underlying });
     });
 
-    // Option Chain payload
-    generateOptionChainPayload(baseNifty);
+    socket.on('disconnect', () => {
+      setIsConnected(false);
+    });
 
-    // Initial alert presets
-    setAlerts([
-      { id: 'al-pcr', name: 'NIFTY PCR Warning Alert', alert_type: 'PCR', underlying: 'NIFTY', condition: 'pcr_oi < 0.8', message_template: 'PCR dropped below critical threshold!', status: 'active' },
-      { id: 'al-spot-break', name: 'NIFTY High Breakout Node', alert_type: 'PRICE', underlying: 'NIFTY', condition: 'price > 22250', message_template: 'Spot price crossed 22250 resistance level', status: 'active' },
-    ]);
+    socket.on('connect_error', () => {
+      setIsConnected(false);
+    });
 
-    // DB Tables list
-    setDbTables([
-      { name: 'ticks', row_count: 1420500, schema: [{ name: 'ts_ms', type: 'BIGINT' }, { name: 'instrumentKey', type: 'VARCHAR' }, { name: 'price', type: 'DOUBLE' }, { name: 'volume', type: 'DOUBLE' }] },
-      { name: 'options_snapshots', row_count: 85200, schema: [{ name: 'timestamp', type: 'TIMESTAMP' }, { name: 'underlying', type: 'VARCHAR' }, { name: 'strike', type: 'INTEGER' }, { name: 'option_type', type: 'VARCHAR' }, { name: 'oi', type: 'INTEGER' }, { name: 'ltp', type: 'DOUBLE' }] },
-      { name: 'pcr_history', row_count: 520, schema: [{ name: 'timestamp', type: 'TIMESTAMP' }, { name: 'pcr_oi', type: 'DOUBLE' }, { name: 'pcr_vol', type: 'DOUBLE' }, { name: 'spot_price', type: 'DOUBLE' }] },
-    ]);
+    // Handle real-time pricing ticks
+    const handleTick = (payload: any) => {
+      if (!payload) return;
+      const timestamp = payload.timestamp || payload.ts_ms || payload.ts || payload.time || Date.now();
+      let price = payload.price ?? payload.ltp ?? payload.c ?? payload.close ?? payload.last_price;
+      if (typeof price !== 'number' && typeof price === 'string') {
+        price = parseFloat(price);
+      }
+      
+      if (typeof price === 'number' && !isNaN(price)) {
+        currentNiftyPriceRef.current = price;
 
-    // Initial insights
-    setGenieInsights([
-      'NIFTY 22100 Put Option seeing intensive support block with heavy volume accumulation.',
-      'PCR (OI) is consolidation flat at 0.94, suggesting tight range boundary trades around ATM.',
-      'Highest Call concentration rests at 22400; immediate resistance barrier for breakout traders.'
-    ]);
-  }, []);
+        const newTick: MarketTick = {
+          ts_ms: timestamp,
+          instrumentKey: payload.instrumentKey || payload.key || `NSE:${underlying}`,
+          price,
+          volume: payload.volume ?? payload.ltq ?? payload.qty ?? 100,
+        };
 
-  // Ticks and live wiggling simulation loop
+        setTicks((prev) => [newTick, ...prev.slice(0, 30)]);
+
+        // Keep active candle wiggling with live LTP
+        setCandlesNifty((prev) => {
+          if (prev.length === 0) return prev;
+          const lastCandle = { ...prev[prev.length - 1] };
+          lastCandle.close = price;
+          lastCandle.high = Math.max(lastCandle.high, price);
+          lastCandle.low = Math.min(lastCandle.low, price);
+          return [...prev.slice(0, -1), lastCandle];
+        });
+
+        // Generate ticks/tape logs
+        const newTape: TradeLog = {
+          id: `t-${timestamp}-${Math.random()}`,
+          timestamp,
+          price,
+          quantity: payload.volume ?? payload.ltq ?? Math.floor(Math.random() * 300) + 50,
+          aggressor: Math.random() > 0.5 ? 'Buy' : 'Sell',
+          symbol: payload.instrumentKey || payload.key || `NSE:${underlying}`,
+        };
+        setTradeLogs((prev) => [newTape, ...prev.slice(0, 40)]);
+      }
+    };
+
+    socket.on('tick', handleTick);
+    socket.on('market_data', handleTick);
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [underlying]);
+
+  // Synchronize intraday candlestick charting arrays on symbol selection
   useEffect(() => {
-    tickTimerRef.current = setInterval(() => {
-      // Create price step wiggles
-      const direction = Math.random() > 0.48 ? 1 : -1;
-      const wiggle = +(Math.random() * 4).toFixed(2) * direction;
-      const nextNifty = +(currentNiftyPriceRef.current + wiggle).toFixed(2);
-      currentNiftyPriceRef.current = nextNifty;
+    let active = true;
 
-      const niftyLTP = nextNifty;
-      // Derive premiums
-      const scaleCe = Math.max(5.0, 120.0 + (niftyLTP - 22150) * 0.55 + Math.random() * 1.5);
-      const scalePe = Math.max(5.0, 105.0 - (niftyLTP - 22150) * 0.45 + Math.random() * 1.5);
+    const loadCandles = async () => {
+      try {
+        const symbolIn = underlying === 'NIFTY' ? 'NSE:NIFTY' : underlying.startsWith('NSE:') ? underlying : `NSE:${underlying}`;
+        const res = await fetch(`${API_SERVER_URL}/api/tv/intraday/${encodeURIComponent(symbolIn)}?interval=1`);
+        if (!res.ok) return;
+        const data = await res.json();
 
-      // Create new Tick entries
-      const newTick: MarketTick = {
-        ts_ms: Date.now(),
-        instrumentKey: 'NSE:NIFTY',
-        price: niftyLTP,
-        volume: Math.floor(Math.random() * 1500) + 200,
-      };
+        if (active && data && Array.isArray(data.candles)) {
+          const formatted = data.candles.map((c: any) => ({
+            time: c[0],
+            open: c[1],
+            high: c[2],
+            low: c[3],
+            close: c[4],
+            volume: c[5],
+          }));
+          setCandlesNifty(formatted);
+        }
+      } catch (e) {
+        console.warn("Failed to fetch underlying candles", e);
+      }
 
-      setTicks((prev) => [newTick, ...prev.slice(0, 30)]);
-
-      // Create TSales Tape logs
-      const newTape: TradeLog = {
-        id: `t-${Date.now()}`,
-        timestamp: Date.now(),
-        price: Math.random() > 0.5 ? scaleCe : scalePe,
-        quantity: Math.floor(Math.random() * 400) + 50,
-        aggressor: Math.random() > 0.5 ? 'Buy' : 'Sell',
-        symbol: Math.random() > 0.5 ? selectedCeStrike : selectedPeStrike,
-      };
-      setTradeLogs((prev) => [newTape, ...prev.slice(0, 40)]);
-
-      // Update active candle series (wiggles affect the last open candle closing value)
-      setCandlesNifty((prev) => {
-        if (prev.length === 0) return prev;
-        const lastCandle = { ...prev[prev.length - 1] };
-        lastCandle.close = niftyLTP;
-        lastCandle.high = Math.max(lastCandle.high, niftyLTP);
-        lastCandle.low = Math.min(lastCandle.low, niftyLTP);
-        return [...prev.slice(0, -1), lastCandle];
-      });
-
-      setCandlesCall((prev) => {
-        if (prev.length === 0) return prev;
-        const lastCandle = { ...prev[prev.length - 1] };
-        lastCandle.close = scaleCe;
-        lastCandle.high = Math.max(lastCandle.high, scaleCe);
-        lastCandle.low = Math.min(lastCandle.low, scaleCe);
-        return [...prev.slice(0, -1), lastCandle];
-      });
-
-      setCandlesPut((prev) => {
-        if (prev.length === 0) return prev;
-        const lastCandle = { ...prev[prev.length - 1] };
-        lastCandle.close = scalePe;
-        lastCandle.high = Math.max(lastCandle.high, scalePe);
-        lastCandle.low = Math.min(lastCandle.low, scalePe);
-        return [...prev.slice(0, -1), lastCandle];
-      });
-
-      // Update positions P&L dynamically relative to the new price wiggles
-      setPositions((prev) =>
-        prev.map((pos) => {
-          const ltpVal = pos.type === 'CE' ? scaleCe : scalePe;
-          const diff = ltpVal - pos.avgPrice;
-          const lotSize = 50;
-          const calculatedPnl = diff * pos.qty * lotSize;
-          return {
-            ...pos,
-            ltp: ltpVal,
-            pnl: calculatedPnl,
-          };
-        })
-      );
-
-      // Check alert conditions dynamically
-      alerts.forEach((alert) => {
-        if (alert.status === 'active') {
-          if (alert.alert_type === 'PRICE' && niftyLTP > 22250) {
-            triggerNotification('BREACH DETECTED!', `NIFTY Spot price ruptured 22250 resistance. Current: ₹${niftyLTP}`);
-          } else if (alert.alert_type === 'PCR' && latestPcrVolume() < 0.8) {
-            triggerNotification('PCR THRESHOLD', 'Put-Call Volume Ratio is leaning extremely bearish.');
+      // Load premium options candles if selected
+      try {
+        if (selectedCeStrike) {
+          const resCE = await fetch(`${API_SERVER_URL}/api/tv/intraday/${encodeURIComponent(selectedCeStrike)}?interval=1`);
+          if (resCE.ok) {
+            const dataCE = await resCE.json();
+            if (active && dataCE && Array.isArray(dataCE.candles)) {
+              setCandlesCall(dataCE.candles.map((c: any) => ({
+                time: c[0], open: c[1], high: c[2], low: c[3], close: c[4], volume: c[5]
+              })));
+            }
           }
         }
-      });
-    }, 1200);
+        if (selectedPeStrike) {
+          const resPE = await fetch(`${API_SERVER_URL}/api/tv/intraday/${encodeURIComponent(selectedPeStrike)}?interval=1`);
+          if (resPE.ok) {
+            const dataPE = await resPE.json();
+            if (active && dataPE && Array.isArray(dataPE.candles)) {
+              setCandlesPut(dataPE.candles.map((c: any) => ({
+                time: c[0], open: c[1], high: c[2], low: c[3], close: c[4], volume: c[5]
+              })));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load options strike candles", err);
+      }
+    };
 
-    return () => clearInterval(tickTimerRef.current);
-  }, [alerts, selectedCeStrike, selectedPeStrike]);
+    loadCandles();
+    const interval = setInterval(loadCandles, 10000);
 
-  const latestPcrVolume = () => (chainPayload ? 0.94 : 0.72);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [underlying, selectedCeStrike, selectedPeStrike]);
 
-  // Generates option chain nodes around ATM strike in steps of 50
-  const generateOptionChainPayload = (basePrice: number) => {
-    const atmBase = Math.round(basePrice / 50) * 50;
-    const chainItems: OptionContract[] = [];
+  // Periodic poll of Option chain & metrics from actual API Server
+  useEffect(() => {
+    let active = true;
 
-    for (let i = -8; i <= 8; i++) {
-      const strike = atmBase + i * 50;
-      const isCE_itm = strike < basePrice;
-      const isPE_itm = strike > basePrice;
+    const fetchAllData = async () => {
+      try {
+        const startTime = performance.now();
+        
+        // 1. Fetch Option Chain with Greeks
+        const chainRes = await fetch(`${API_SERVER_URL}/api/options/chain/${underlying}/with-greeks`);
+        if (!chainRes.ok) throw new Error('API server down');
+        const chainData = await chainRes.json();
+        
+        // 2. Fetch Support & Resistance
+        const srRes = await fetch(`${API_SERVER_URL}/api/options/support-resistance/${underlying}`);
+        const srData = srRes.ok ? await srRes.json() : null;
 
-      // Call Contract
-      const ceLtp = Math.max(3.5, 120 - (strike - basePrice) * 0.55);
-      chainItems.push({
-        strike,
-        expiry: '2026-06-25',
-        option_type: 'call',
-        ltp: ceLtp,
-        oi: Math.floor(Math.max(10000, 2400000 - Math.abs(strike - basePrice) * 400)),
-        oi_change: Math.floor(Math.random() * 80000 - 15000),
-        volume: Math.floor(Math.max(200, 480000 - Math.abs(strike - basePrice) * 100)),
-        delta: isCE_itm ? 0.75 : 0.32,
-        gamma: 0.002,
-        theta: -8.5,
-        vega: 12.1,
-        iv: 0.145,
-        moneyness: isCE_itm ? 'ITM' : strike === atmBase ? 'ATM' : 'OTM',
-        distance_from_atm_pct: +(Math.abs(strike - basePrice) / basePrice * 100).toFixed(2),
-      });
+        // 3. Fetch Genie Insights
+        const genieRes = await fetch(`${API_SERVER_URL}/api/options/genie-insights/${underlying}`);
+        const genieData = genieRes.ok ? await genieRes.json() : null;
 
-      // Put Contract
-      const peLtp = Math.max(3.5, 105 + (strike - basePrice) * 0.45);
-      chainItems.push({
-        strike,
-        expiry: '2026-06-25',
-        option_type: 'put',
-        ltp: peLtp,
-        oi: Math.floor(Math.max(10000, 2100000 - Math.abs(strike - basePrice) * 400)),
-        oi_change: Math.floor(Math.random() * 75000 - 10000),
-        volume: Math.floor(Math.max(200, 410000 - Math.abs(strike - basePrice) * 100)),
-        delta: isPE_itm ? -0.72 : -0.28,
-        gamma: 0.002,
-        theta: -8.1,
-        vega: 11.2,
-        iv: 0.151,
-        moneyness: isPE_itm ? 'ITM' : strike === atmBase ? 'ATM' : 'OTM',
-        distance_from_atm_pct: +(Math.abs(strike - basePrice) / basePrice * 100).toFixed(2),
-      });
-    }
+        // 4. Fetch PCR Trend History
+        const pcrRes = await fetch(`${API_SERVER_URL}/api/options/pcr-trend/${underlying}`);
+        const pcrData = pcrRes.ok ? await pcrRes.json() : null;
 
-    setChainPayload({
-      underlying: 'NIFTY',
-      spot_price: basePrice,
-      chain: chainItems,
-      source: 'DuckDB Snapshot Cache',
-    });
+        // 5. Fetch OI Buildups
+        const oiBuildRes = await fetch(`${API_SERVER_URL}/api/options/oi-buildup/${underlying}`);
+        const oiBuildData = oiBuildRes.ok ? await oiBuildRes.json() : null;
 
-    // Populate OI buildup patterns
-    const buildups = visibleStrikesForOi(atmBase).map((strike) => ({
-      strike,
-      option_type: Math.random() > 0.5 ? 'call' : 'put',
-      oi_change: Math.floor(Math.random() * 45000 + 10000),
-      signal: ['long_buildup', 'short_buildup', 'short_covering', 'long_unwinding'][Math.floor(Math.random() * 4)],
-    }));
-    setOiBuildups(buildups);
-  };
+        // 6. Fetch Alerts List
+        const alertsRes = await fetch(`${API_SERVER_URL}/api/alerts`);
+        const alertsData = alertsRes.ok ? await alertsRes.json() : null;
 
-  const visibleStrikesForOi = (atm: number) => [atm - 150, atm - 100, atm - 50, atm, atm + 50, atm + 100, atm + 150];
+        // Calculate actual API round-trip latency
+        const endTime = performance.now();
+        setLatency(Math.round(endTime - startTime));
+
+        if (!active) return;
+
+        setIsConnected(true);
+
+        if (chainData) {
+          setChainPayload({
+            underlying: chainData.underlying || underlying,
+            spot_price: chainData.spot_price || currentNiftyPriceRef.current,
+            chain: chainData.chain || [],
+            source: chainData.source || 'Active FastAPI Gateway',
+          });
+          if (chainData.spot_price) {
+            currentNiftyPriceRef.current = chainData.spot_price;
+          }
+        }
+
+        if (srData) {
+          setSupportResistance({
+            support: srData.support || [],
+            resistance: srData.resistance || [],
+          });
+        }
+
+        if (genieData && genieData.insights) {
+          setGenieInsights(genieData.insights);
+        }
+
+        if (pcrData && pcrData.history) {
+          setPcrHistory(pcrData.history);
+        }
+
+        if (oiBuildData && oiBuildData.buildups) {
+          const formattedOi = (oiBuildData.buildups || []).map((item: any) => ({
+            strike: item.strike,
+            option_type: item.option_type || 'call',
+            oi_change: item.oi_change || 0,
+            signal: item.buildup_status || 'long_buildup',
+          }));
+          setOiBuildups(formattedOi);
+        }
+
+        if (alertsData && alertsData.alerts) {
+          setAlerts(alertsData.alerts.map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            alert_type: a.alert_type,
+            underlying: a.underlying,
+            condition: a.condition,
+            message_template: a.message_template,
+            status: a.status === 'active' ? 'active' : 'paused',
+          })));
+        }
+
+      } catch (err) {
+        if (active) {
+          setLatency(0);
+        }
+      }
+    };
+
+    fetchAllData();
+    const interval = setInterval(fetchAllData, 5000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [underlying]);
+
+  // Load real database table schema and catalogs
+  useEffect(() => {
+    let active = true;
+    const fetchDbTables = async () => {
+      try {
+        const res = await fetch(`${API_SERVER_URL}/api/db/tables`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (active && data && data.tables) {
+          setDbTables(data.tables);
+        }
+      } catch (err) {
+        console.error("Error loading DuckDB tables", err);
+      }
+    };
+    fetchDbTables();
+    return () => { active = false; };
+  }, []);
 
   // Notification framework
   const triggerNotification = (title: string, message: string) => {
     const alertId = `toast-${Date.now()}`;
     setToastAlert({ id: alertId, title, message });
 
-    // Emulate a visual signal block log
     const newSig: BrainSignal = {
       id: `sig-${Date.now()}`,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       type: 'LONG',
       message: `${title}: ${message}`,
-      strength: 88,
+      strength: 85,
     };
     setSignals((prev) => [newSig, ...prev.slice(0, 10)]);
 
-    // Autoclose after 6 seconds
     setTimeout(() => {
       setToastAlert((prev) => (prev?.id === alertId ? null : prev));
     }, 6000);
   };
 
   // Replay Triggers
-  const startReplay = (startTime: string, speed: number) => {
+  const startReplay = async (startTime: string, speed: number) => {
     setIsReplayRunning(true);
-    triggerNotification('REPLAY RUNNING', `Activated NIFTY tick replays from timestamp: ${startTime} at speed ${speed}x.`);
+    triggerNotification('REPLAY RUNNING', `Triggering Python historical aggregator replay at ${speed}x.`);
+    if (socketRef.current) {
+      socketRef.current.emit('start_replay', {
+        symbol: underlying === 'NIFTY' ? 'NSE:NIFTY' : underlying,
+        start_time: startTime,
+        speed,
+      });
+    }
   };
 
-  const stopReplay = () => {
+  const stopReplay = async () => {
     setIsReplayRunning(false);
-    triggerNotification('REPLAY SUSPENDED', 'Successfully halted historical order stream. Bounded back to Live feed.');
+    triggerNotification('REPLAY SUSPENDED', 'Stopped historical aggregation replay.');
+    if (socketRef.current) {
+      socketRef.current.emit('stop_replay', {});
+    }
   };
 
   // Option Buyer portfolio actions
@@ -357,140 +387,210 @@ export default function App() {
 
   const exitAllPositions = () => {
     setPositions([]);
-    triggerNotification('PANIC COLLATERAL SOLD', 'Market panic sell triggers triggered. Flushed all active options inventory to cash.');
+    triggerNotification('PANIC COLLATERAL SOLD', 'Market panic sell triggers triggered. Flushed all active options inventory.');
   };
 
-  // Trigger backfill Today options history
-  const handleTriggerBackfill = () => {
+  // Trigger backfill Today options history via genuine backend workers
+  const handleTriggerBackfill = async () => {
     setIsBackfilling(true);
-    triggerNotification('BACKFILL INTENT REGISTERED', 'Triggering backend service workers. Compressing today\'s market ticks into options snapshot history logs.');
-    setTimeout(() => {
-      setIsBackfilling(false);
-      triggerNotification('BACKFILL WORKER COMPLETE', 'DuckDB snapshot tables updated. Cached 1,420 contracts snapshots.');
-    }, 3000);
-  };
-
-  // Refresh AI Genie report
-  const refreshInsights = () => {
-    setReloadingInsights(true);
-    setTimeout(() => {
-      setGenieInsights([
-        'AI Sentiment Report: PCR trend has shifted slightly bullish as 22100 put writers add significant leverage.',
-        'High execution speed tick volumes detect heavy absorption at 22200 call option level; potential breakout on index cross.',
-        'Theta attrition is currently low (~ -8.5/day), indicating optimal premium buying window while volatility index rank holds 42%'
-      ]);
-      setReloadingInsights(false);
-      triggerNotification('GENIE REPORT COMPLETED', 'Synthesized options metrics and order-book imbalances. Insights deck armed.');
-    }, 1500);
-  };
-
-  // Build customize options strategies payoff metrics
-  const buildStrategyUrl = (type: string, data: any) => {
-    setBuildingStrategy(true);
-    setTimeout(() => {
-      const parsedStrategy: Strategy = {
-        name: type === 'bull-call-spread' ? 'Bull Call Spread' : type === 'iron-condor' ? 'Iron Condor' : 'Long Straddle',
-        underlying: 'NIFTY',
-        spot_price: data.spot_price,
-        legs: type === 'bull-call-spread' ? [
-          { option_type: 'call', strike: data.lower_strike, action: 'buy', quantity: 1, premium: data.lower_premium, expiry: data.expiry },
-          { option_type: 'call', strike: data.higher_strike, action: 'sell', quantity: 1, premium: data.higher_premium, expiry: data.expiry }
-        ] : [],
-        analysis: {
-          max_profit: type === 'bull-call-spread' ? (data.higher_strike - data.lower_strike - (data.lower_premium - data.higher_premium)) * 50 : 3500,
-          max_loss: type === 'bull-call-spread' ? (data.lower_premium - data.higher_premium) * 50 : 2500,
-          breakeven: type === 'bull-call-spread' ? [data.lower_strike + (data.lower_premium - data.higher_premium)] : [21850, 22250]
-        }
-      };
-      setActiveStrategy(parsedStrategy);
-      setBuildingStrategy(false);
-      triggerNotification('PAYOFF CALCULATED', `Strategy payoff profile compiled. Max risk pegged to ₹${parsedStrategy.analysis?.max_loss}.`);
-    }, 1200);
-  };
-
-  // Alerts parameters updater
-  const addAlert = (newAlert: { name: string; alert_type: string; condition: string }) => {
-    const payload: Alert = {
-      id: `al-${Date.now()}`,
-      name: newAlert.name,
-      alert_type: newAlert.alert_type,
-      underlying: 'NIFTY',
-      condition: newAlert.condition,
-      message_template: 'Dynamic trigger crossing identified',
-      status: 'active',
-    };
-    setAlerts((prev) => [payload, ...prev]);
-    triggerNotification('ALERT DRAFTED', `Trigger monitor armed for formula: ${payload.condition}`);
-  };
-
-  const deleteAlert = (id: string) => {
-    setAlerts((prev) => prev.filter((a) => a.id !== id));
-    triggerNotification('ALERT DISARMED', 'Cleaned alert parameters from system memory.');
-  };
-
-  const pauseAlert = (id: string) => {
-    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status: 'paused' } : a)));
-  };
-
-  const resumeAlert = (id: string) => {
-    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status: 'active' } : a)));
-  };
-
-  // SQL Query database console executor
-  const executeSqlQuery = (sql: string) => {
-    setIsQuerying(true);
-    setTimeout(() => {
-      // Direct mock execution layer to ensure total operational integrity
-      let results: any[] = [];
-      const lowerSql = sql.toLowerCase();
-
-      try {
-        if (lowerSql.includes('pcr')) {
-          results = [
-            { timestamp: '2026-06-14 09:30', pcr_oi: 0.94, pcr_vol: 1.05, spot_price: 22152.50 },
-            { timestamp: '2026-06-14 10:00', pcr_oi: 0.96, pcr_vol: 1.02, spot_price: 22168.10 },
-            { timestamp: '2026-06-14 10:30', pcr_oi: 0.92, pcr_vol: 1.06, spot_price: 22144.30 },
-          ];
-        } else if (lowerSql.includes('options_snapshots')) {
-          results = [
-            { strike: 22100, option_type: 'call', oi: 1850000, volume: 34000, ltp: 135.20 },
-            { strike: 22100, option_type: 'put', oi: 1540000, volume: 22000, ltp: 92.40 },
-            { strike: 22200, option_type: 'call', oi: 1980000, volume: 46000, ltp: 88.50 },
-            { strike: 22200, option_type: 'put', oi: 1110000, volume: 15000, ltp: 138.40 },
-          ];
-        } else {
-          // default ticks feedback
-          results = [
-            { ts_ms: Date.now() - 500, instrumentKey: 'NSE:NIFTY', price: currentNiftyPriceRef.current, volume: 450 },
-            { ts_ms: Date.now() - 1500, instrumentKey: 'NSE:NIFTY', price: currentNiftyPriceRef.current - 1.2, volume: 820 },
-            { ts_ms: Date.now() - 2500, instrumentKey: 'NSE:NIFTY', price: currentNiftyPriceRef.current + 2.1, volume: 110 },
-          ];
-        }
-        setDbQueryResult({ results });
-        triggerNotification('QUERY COMPLETE', 'DuckDB query executed. Formatted logs outputted in results.');
-      } catch (err: any) {
-        setDbQueryResult({ results: [], error: err.message });
-      } finally {
-        setIsQuerying(false);
+    triggerNotification('BACKFILL ACTIVE', 'Prompting backend server for options snapshots compression...');
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/options/backfill`, { method: 'POST' });
+      if (res.ok) {
+        triggerNotification('BACKFILL EXECUTED', 'Backfill sequence initialized successfully in the background.');
       }
-    }, 1000);
+    } catch (e) {
+      triggerNotification('BACKFILL ERROR', 'Unable to connect to backfiller worker.');
+    } finally {
+      setIsBackfilling(false);
+    }
   };
 
-  const exportCsv = (sql: string) => {
-    triggerNotification('SPREADSHEET GENERATED', 'Compiling and packing DuckDB dataset blocks. CSV spreadsheet download started.');
-    const headers = 'ts_ms,instrumentKey,price,volume\n';
-    const rows = `${Date.now()},NSE:NIFTY,22152.40,540\n${Date.now() - 1000},NSE:NIFTY,22150.30,420`;
-    const docCSV = headers + rows;
+  // Refresh AI Genie report from real options endpoints
+  const refreshInsights = async () => {
+    setReloadingInsights(true);
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/options/genie-insights/${underlying}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.insights) {
+          setGenieInsights(data.insights);
+          triggerNotification('GENIE REPORT REFRESHED', 'Synthesized real-time options metrics and order-book imbalances.');
+        }
+      }
+    } catch (err) {
+      triggerNotification('GENIE ERROR', 'Failed to refresh analytical report from endpoint.');
+    } finally {
+      setReloadingInsights(false);
+    }
+  };
 
-    const blob = new Blob([docCSV], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'duckdb_market_export.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  // Build customize options strategies payoff metrics using real Python calculations
+  const buildStrategyUrl = async (type: string, data: any) => {
+    setBuildingStrategy(true);
+    try {
+      const endpoint = type === 'bull-call-spread' 
+        ? `${API_SERVER_URL}/api/strategy/bull-call-spread`
+        : type === 'iron-condor'
+        ? `${API_SERVER_URL}/api/strategy/iron-condor`
+        : `${API_SERVER_URL}/api/strategy/long-straddle`;
+
+      const payload = {
+        underlying,
+        spot_price: currentNiftyPriceRef.current || data.spot_price,
+        ...data,
+      };
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.status === 'success' && resData.analysis) {
+          const parsedStrategy: Strategy = {
+            name: type === 'bull-call-spread' ? 'Bull Call Spread' : type === 'iron-condor' ? 'Iron Condor' : 'Long Straddle',
+            underlying,
+            spot_price: currentNiftyPriceRef.current || data.spot_price,
+            legs: resData.analysis.legs || [],
+            analysis: {
+              max_profit: resData.analysis.max_profit || 0,
+              max_loss: resData.analysis.max_loss || 0,
+              breakeven: resData.analysis.breakeven || [],
+            }
+          };
+          setActiveStrategy(parsedStrategy);
+          triggerNotification('PAYOFF REGISTERED', `Completed standard ${parsedStrategy.name} risk metrics synthesis.`);
+        }
+      }
+    } catch (e) {
+      triggerNotification('STRATEGY ERROR', 'Standard strategy optimization compiler failure.');
+    } finally {
+      setBuildingStrategy(false);
+    }
+  };
+
+  // Real alert system handlers
+  const addAlert = async (newAlert: { name: string; alert_type: string; condition: string }) => {
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/alerts/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newAlert.name,
+          alert_type: newAlert.alert_type,
+          underlying,
+          condition: newAlert.condition,
+          message_template: 'Breach of condition threshold detected',
+          cooldown_minutes: 5,
+          notification_channels: ['websocket'],
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.alert) {
+          setAlerts((prev) => [{
+            id: data.alert.id,
+            name: data.alert.name,
+            alert_type: data.alert.alert_type,
+            underlying: data.alert.underlying,
+            condition: data.alert.condition,
+            message_template: data.alert.message_template,
+            status: data.alert.status === 'active' ? 'active' : 'paused',
+          }, ...prev]);
+          triggerNotification('ALERT DRAFTED', `Synchronized alert key: ${data.alert.id} with storage logs.`);
+        }
+      }
+    } catch (err) {
+      triggerNotification('ALERT ERROR', 'Failed to register alert target with Python worker.');
+    }
+  };
+
+  const deleteAlert = async (id: string) => {
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/alerts/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setAlerts((prev) => prev.filter((a) => a.id !== id));
+        triggerNotification('ALERT DIALED OUT', 'Successfully cleared threshold trigger.');
+      }
+    } catch (err) {
+      triggerNotification('ALERT ERROR', 'Unable to delete alert from broker registry.');
+    }
+  };
+
+  const pauseAlert = async (id: string) => {
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/alerts/${id}/pause`, { method: 'POST' });
+      if (res.ok) {
+        setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status: 'paused' } : a)));
+      }
+    } catch (e) {
+      console.warn("Error pausing alert", e);
+    }
+  };
+
+  const resumeAlert = async (id: string) => {
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/alerts/${id}/resume`, { method: 'POST' });
+      if (res.ok) {
+        setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, status: 'active' } : a)));
+      }
+    } catch (e) {
+      console.warn("Error resuming alert", e);
+    }
+  };
+
+  // SQL Query database console executor via actual DuckDB API
+  const executeSqlQuery = async (sql: string) => {
+    setIsQuerying(true);
+    setDbQueryResult({ results: [] });
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/db/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDbQueryResult({ results: data.results || [] });
+        triggerNotification('QUERY COMPLETE', `DuckDB query executed. Loaded ${data.results?.length || 0} rows.`);
+      } else {
+        const data = await res.json();
+        setDbQueryResult({ results: [], error: data.detail || 'Query execution error' });
+      }
+    } catch (err: any) {
+      setDbQueryResult({ results: [], error: err.message || 'Database connection failure' });
+    } finally {
+      setIsQuerying(false);
+    }
+  };
+
+  const exportCsv = async (sql: string) => {
+    triggerNotification('SPREADSHEET INBOUND', 'Compiling DuckDB query tables down to CSV...');
+    try {
+      const res = await fetch(`${API_SERVER_URL}/api/db/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql }),
+      });
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'duckdb_queries_export.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        triggerNotification('CSV READY', 'Synchronized dataset downloaded successfully.');
+      }
+    } catch (err) {
+      triggerNotification('EXPORT ERROR', 'Unable to fetch table aggregates.');
+    }
   };
 
   return (
