@@ -67,7 +67,7 @@ export default function Navbar({
             { id: 'scalper', title: 'HFT SCALPER' },
             { id: 'orderflow', title: 'ORDER FLOW' },
             { id: 'charts', title: 'CHARTS MULTI' },
-            { id: 'db', title: 'DUCKDB CLIENT' },
+            { id: 'db', title: 'DATABASE API' },
             { id: 'strategy', title: 'ALERTS & LEGS' },
           ].map((tab) => (
             <button

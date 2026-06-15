@@ -602,7 +602,7 @@ export default function App() {
           <div className="flex items-center justify-between p-3 bg-rose-500/10 border border-rose-500/20 rounded-lg text-xs text-rose-400 font-medium">
             <div className="flex items-center gap-1.5 font-mono">
               <WifiOff className="w-4 h-4 animate-pulse" />
-              <span>STABILITY CLOCK: LOCAL DUCKDB CONNECTION DISCONNECTED. RESILIENT STAGING PROTOCOL ACTIVE.</span>
+              <span>STABILITY CLOCK: REAL-TIME BACKEND CONNECTION DISCONNECTED. RESILIENT STAGING PROTOCOL ACTIVE.</span>
             </div>
             <button onClick={() => setIsConnected(true)} className="flex items-center gap-1 text-[10px] bg-rose-500/25 hover:bg-rose-500/35 px-2 py-0.5 rounded border border-rose-500/30">
               <RefreshCw className="w-3 h-3" /> RECONNECT

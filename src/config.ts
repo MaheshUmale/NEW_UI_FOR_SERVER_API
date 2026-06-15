@@ -15,12 +15,11 @@
 // In dynamic distributed development systems (e.g. FastAPI / Socket.IO running on local, remote VPS, or other containers),
 // it leverages Vite's environmental replacement engine 'import.meta.env'.
 const getApiServerUrl = () => {
-  if (typeof window !== 'undefined') {
-    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      return window.location.origin;
-    }
+  const envVal = (import.meta as any).env.VITE_API_SERVER_URL;
+  if (envVal) {
+    return envVal;
   }
-  return (import.meta as any).env.VITE_API_SERVER_URL || 'http://localhost:8000';
+  return 'http://localhost:8000';
 };
 
 export const API_SERVER_URL = getApiServerUrl();
@@ -28,12 +27,11 @@ export const API_SERVER_URL = getApiServerUrl();
 // 2. Resolve WebSocket/Socket.IO Server Gateway.
 // Separate Socket gateway mapping (often matches the REST base URL but uses ws/wss protocol or same host gateway)
 const getSocketServerUrl = () => {
-  if (typeof window !== 'undefined') {
-    if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      return window.location.origin;
-    }
+  const envVal = (import.meta as any).env.VITE_SOCKET_SERVER_URL;
+  if (envVal) {
+    return envVal;
   }
-  return (import.meta as any).env.VITE_SOCKET_SERVER_URL || 'http://localhost:8000';
+  return 'http://localhost:8000';
 };
 
 export const SOCKET_SERVER_URL = getSocketServerUrl();

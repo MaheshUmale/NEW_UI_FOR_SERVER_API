@@ -1211,16 +1211,6 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
             >
               WORKSPACE FEED
             </button>
-            <button
-              onClick={() => { setDataSource('SIMULATOR'); handleResetData(); }}
-              className={`px-2 py-0.5 rounded text-[9.5px] font-mono font-bold transition-all ${
-                dataSource === 'SIMULATOR'
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              MOCK SIMULATOR
-            </button>
           </div>
 
           {/* Candle Duration Selector */}
@@ -1366,7 +1356,7 @@ export default function OrderFlowTab({ niftyLtp, ticks, tradeLogs }: OrderFlowTa
         <div className="xl:col-span-9 bg-[#050914] border border-[#141d2f]/70 rounded-lg flex flex-col overflow-hidden relative group">
           <div className="absolute top-1.5 left-2 z-10 select-none pointer-events-none flex items-center space-x-2">
             <span className="text-[9px] bg-indigo-900/40 border border-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded font-mono font-bold">
-              SPOT INDEX: {dataSource === 'SOCKET_IO' ? customSymbol : 'NIFTY'} ({dataSource === 'SOCKET_IO' ? 'SOCKET.IO REAL' : dataSource === 'WORKSPACE' ? 'WORKSPACE REAL' : 'HFT SIMULATOR'})
+              SPOT INDEX: {dataSource === 'SOCKET_IO' ? customSymbol : 'NIFTY'} ({dataSource === 'SOCKET_IO' ? 'SOCKET.IO REAL' : 'WORKSPACE REAL'})
             </span>
             <span className="text-[8.5px] text-slate-500 font-mono">
               [Pan view by clicking & dragging inside grid • Scrollwheel zooms]

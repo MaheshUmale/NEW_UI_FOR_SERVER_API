@@ -63,7 +63,7 @@ export default function DbQueryTab({
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-1.5">
         {tables.length === 0 ? (
           <div className="p-2 bg-[#0d1323] border border-slate-800 rounded-lg col-span-4 flex items-center justify-center text-xs text-slate-500 font-mono">
-            Scanning local DuckDB database catalog tables...
+            Retrieving database tables via API gateway...
           </div>
         ) : (
           tables.map((table) => (
@@ -97,7 +97,7 @@ export default function DbQueryTab({
           <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-3 flex-shrink-0">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5 font-sans">
               <Terminal className="w-4 h-4 text-sky-400" />
-              DUCKDB ANALYTICAL WORKSPACE
+              ANALYTICAL DATABASE GATEWAY (VIA API)
             </h3>
 
             <div className="flex space-x-1.5">
@@ -226,7 +226,7 @@ export default function DbQueryTab({
           {queryResult.error ? (
             <div className="flex items-center space-x-2 p-3 bg-rose-500/10 text-rose-400 rounded-lg border border-rose-500/20">
               <HelpCircle className="w-5 h-5 flex-shrink-0" />
-              <span>DuckDB Error: {queryResult.error}</span>
+              <span>Database Query Error: {queryResult.error}</span>
             </div>
           ) : queryResult.results?.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
